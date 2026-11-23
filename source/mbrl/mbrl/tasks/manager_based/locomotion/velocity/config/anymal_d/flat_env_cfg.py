@@ -9,8 +9,12 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
-from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_d.rough_env_cfg import AnymalDRoughEnvCfg
-from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import ObservationsCfg, RewardsCfg
+from mbrl.compat import import_anymal_rough_env_cfg, import_velocity_env_cfg
+
+_velocity_env_cfg = import_velocity_env_cfg()
+ObservationsCfg = _velocity_env_cfg.ObservationsCfg
+RewardsCfg = _velocity_env_cfg.RewardsCfg
+AnymalDRoughEnvCfg = import_anymal_rough_env_cfg()
 
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort: skip
 
@@ -33,6 +37,15 @@ class AnymalDFlatEnvCfg(AnymalDRoughEnvCfg):
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
+
+        # Keep the pre-migration base-mass randomization. Isaac Lab 3.x's velocity template replaced
+        # the uniform additive range with a multiplicative log-uniform scaling, so the parameters are
+        # restored explicitly; both generations use ``randomize_rigid_body_mass`` with the same
+        # signature (operation="add", uniform distribution, recomputed inertia).
+        self.events.add_base_mass.params["asset_cfg"] = SceneEntityCfg("robot", body_names="base")
+        self.events.add_base_mass.params["mass_distribution_params"] = (-5.0, 5.0)
+        self.events.add_base_mass.params["operation"] = "add"
+        self.events.add_base_mass.params["distribution"] = "uniform"
 
         # override rewards
         self.rewards.flat_orientation_l2.weight = -5.0

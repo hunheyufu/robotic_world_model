@@ -13,19 +13,27 @@
             "console": "integratedTerminal",
         },
         {
+            // World-model pretraining (PPO policy + neural dynamics, online data collection).
+            // For the warm-started stage use the "-Finetune-v0" task and add
+            // "--checkpoint <policy.pt> --system_dynamics_load_path <model.pt>"; "--smoke" runs an
+            // acceptance-sized version of the same entry point.
             "name": "Python: Train Environment",
             "type": "debugpy",
             "request": "launch",
-            "args" : ["--task", "Template-Isaac-Velocity-Flat-Anymal-D-v0", "--num_envs", "4096", "--headless"],
-            "program": "${workspaceFolder}/scripts/rsl_rl/train.py",
+            "args" : ["--task", "Template-Isaac-Velocity-Flat-Anymal-D-Pretrain-v0", "--num_envs", "4096", "--headless"],
+            "program": "${workspaceFolder}/scripts/reinforcement_learning/rsl_rl/train.py",
             "console": "integratedTerminal",
         },
         {
+            // Plays the newest checkpoint under logs/rsl_rl/anymal_d_flat. Add
+            // "--checkpoint <file>" or "--load_run <run dir>" to pin a different one. The task only
+            // supplies the env + runner config, so it can be swapped for another "-...-v0" variant of
+            // the same task family.
             "name": "Python: Play Environment",
             "type": "debugpy",
             "request": "launch",
-            "args" : ["--task", "Template-Isaac-Velocity-Flat-Anymal-D-Play-v0", "--num_envs", "32"],
-            "program": "${workspaceFolder}/scripts/rsl_rl/play.py",
+            "args" : ["--task", "Template-Isaac-Velocity-Flat-Anymal-D-Init-v0", "--num_envs", "32"],
+            "program": "${workspaceFolder}/scripts/reinforcement_learning/rsl_rl/play.py",
             "console": "integratedTerminal",
         },
 
@@ -44,8 +52,8 @@
             "name": "Docker: Train Environment",
             "type": "debugpy",
             "request": "launch",
-            "args" : ["--task", "Template-Isaac-Velocity-Flat-Anymal-D-v0", "--num_envs", "4096", "--headless"],
-            "program": "${workspaceFolder}/scripts/rsl_rl/train.py",
+            "args" : ["--task", "Template-Isaac-Velocity-Flat-Anymal-D-Pretrain-v0", "--num_envs", "4096", "--headless"],
+            "program": "${workspaceFolder}/scripts/reinforcement_learning/rsl_rl/train.py",
             "console": "integratedTerminal",
             "env": {
                 "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}"
@@ -55,8 +63,8 @@
             "name": "Docker: Play Environment",
             "type": "debugpy",
             "request": "launch",
-            "args" : ["--task", "Template-Isaac-Velocity-Flat-Anymal-D-Play-v0", "--num_envs", "32"],
-            "program": "${workspaceFolder}/scripts/rsl_rl/play.py",
+            "args" : ["--task", "Template-Isaac-Velocity-Flat-Anymal-D-Init-v0", "--num_envs", "32"],
+            "program": "${workspaceFolder}/scripts/reinforcement_learning/rsl_rl/play.py",
             "console": "integratedTerminal",
             "env": {
                 "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}"

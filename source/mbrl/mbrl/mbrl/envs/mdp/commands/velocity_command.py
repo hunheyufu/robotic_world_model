@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 from isaaclab.markers import VisualizationMarkers, CUBOID_MARKER_CFG
 from isaaclab.envs.mdp.commands.velocity_command import UniformVelocityCommand
 
+from mbrl.compat import as_env_ids, to_tensor
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -27,6 +29,7 @@ class UniformVelocityCommand_Visualize(UniformVelocityCommand):
         
     def _resample_command(self, env_ids: Sequence[int]):
         # intersect the reset envs with only the real envs
+        env_ids = as_env_ids(self.env, env_ids)
         uniques, counts = torch.cat([env_ids, self.env.env_ids_real]).unique(return_counts=True)
         env_ids = uniques[counts > 1]
         super()._resample_command(env_ids)
@@ -65,7 +68,7 @@ class UniformVelocityCommand_Visualize(UniformVelocityCommand):
         super()._debug_vis_callback(event)
         # update the markers
         # -- real
-        marker_position = self.robot.data.root_pos_w.clone()
+        marker_position = to_tensor(self.robot.data.root_pos_w).clone()
         marker_position[:, 2] += 1.0
         self.real_visualizer.visualize(marker_position[self.env.env_ids_real])
         # -- imagination

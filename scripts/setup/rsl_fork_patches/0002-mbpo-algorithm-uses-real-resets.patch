@@ -1,0 +1,114 @@
+Project patch for the vendored RWM rsl_rl fork: algorithms/mbpo_ppo.py
+
+Applied by scripts/setup/vendor_rsl_fork.py after the rsl_rl.* -> mbrl.rl.rsl_rl_fork.*
+import rewrite; see the [vendor patch:*] comments in the code. Never edit the vendored tree by hand.
+
+--- a/algorithms/mbpo_ppo.py
++++ b/algorithms/mbpo_ppo.py
+@@ -91,6 +91,8 @@
+         self.system_dynamics_learning_rate = system_dynamics_learning_rate
+         self.system_dynamics_weight_decay = system_dynamics_weight_decay
+         self.imagination_storage = None  # initialized later
++        # [vendor patch:replay-time-order] set when the last evaluation had no valid trajectory
++        self.last_evaluation_skipped = False
+         # System dynamics components
+         self.system_dynamics = system_dynamics
+         self.system_dynamics.to(self.device)
+@@ -160,7 +162,10 @@
+         self.transition.clear()
+         self.policy.reset(dones)
+ 
+-    def fill_history_buffer(self, obs):
++    def fill_history_buffer(self, obs, dones=None):
++        # [vendor patch:replay-time-order] The episode boundary comes from the environment's real
++        # ``dones`` (``terminated | truncated``); ``system_termination`` is a *learning target*
++        # (base-contact label) and must not be used to decide whether a window is contiguous.
+         system_state = obs["system_state"]
+         system_action = obs["system_action"]
+         system_extension = obs.get("system_extension")
+@@ -176,7 +181,8 @@
+                 system_extension.unsqueeze(1) if system_extension is not None else None,
+                 system_contact.unsqueeze(1) if system_contact is not None else None,
+                 system_termination.unsqueeze(1) if system_termination is not None else None,
+-                ]
++                ],
++            reset_flags=None if dones is None else dones.reshape(-1, 1),
+             )
+ 
+     def compute_returns(self, obs, imagination=False):
+@@ -197,6 +203,7 @@
+         mean_system_extension_loss = 0
+         mean_system_contact_loss = 0
+         mean_system_termination_loss = 0
++        system_dynamics_num_updates = 0
+         system_generator = self.system_replay_buffer.mini_batch_generator(
+             self.system_dynamics.history_horizon + self.system_dynamics_forecast_horizon,
+             self.system_dynamics_num_mini_batches,
+@@ -225,6 +232,7 @@
+             loss.backward()
+             nn.utils.clip_grad_norm_(self.system_dynamics.parameters(), self.max_grad_norm)
+             self.system_dynamics_optimizer.step()
++            system_dynamics_num_updates += 1
+             mean_system_state_loss += state_loss.item()
+             mean_system_sequence_loss += sequence_loss.item()
+             mean_system_bound_loss += bound_loss.item()
+@@ -232,8 +240,19 @@
+             mean_system_extension_loss += extension_loss.item()
+             mean_system_contact_loss += contact_loss.item()
+             mean_system_termination_loss += termination_loss.item()
+-    
+-        system_dynamics_num_updates = self.system_dynamics_num_mini_batches
++
++        # [vendor patch:replay-time-order] With no valid sequence the generator yields nothing and
++        # no optimizer step is taken; report zeros instead of dividing by the configured count.
++        if system_dynamics_num_updates == 0:
++            return (
++                mean_system_state_loss,
++                mean_system_sequence_loss,
++                mean_system_bound_loss,
++                mean_system_kl_loss,
++                mean_system_extension_loss,
++                mean_system_contact_loss,
++                mean_system_termination_loss,
++            )
+         mean_system_state_loss /= system_dynamics_num_updates
+         mean_system_sequence_loss /= system_dynamics_num_updates
+         mean_system_bound_loss /= system_dynamics_num_updates
+@@ -244,10 +263,24 @@
+         return mean_system_state_loss, mean_system_sequence_loss, mean_system_bound_loss, mean_system_kl_loss, mean_system_extension_loss, mean_system_contact_loss, mean_system_termination_loss
+     
+     def evaluate_system_dynamics(self):
++        sequence_length = self.system_dynamics_len_eval_trajectory
++        # [vendor patch:replay-time-order] Evaluation must run on real, contiguous, episode-consistent
++        # trajectories.  Zero-padded windows would make the reported error meaningless, so the
++        # evaluation is skipped (and logged as such) until enough data exists.
++        if self.system_replay_buffer.num_valid_sequences(sequence_length) == 0:
++            print(
++                f"[WARN] Skipping the system-dynamics evaluation: no valid trajectory of length "
++                f"{sequence_length} yet.",
++                flush=True,
++            )
++            self.last_evaluation_skipped = True
++            return None
++        self.last_evaluation_skipped = False
+         system_generator = self.system_replay_buffer.mini_batch_generator(
+-            self.system_dynamics_len_eval_trajectory,
++            sequence_length,
+             1,
+             self.system_dynamics_num_eval_trajectories,
++            strict=True,
+         )
+         state_traj, action_traj, extension_traj, contact_traj, termination_traj = next(system_generator)
+         state_traj_pred, _, _, action_traj_pred, extension_traj_pred, contact_traj_pred, termination_traj_pred = self.system_dynamics_autoregressive_prediction(state_traj, action_traj, extension_traj, contact_traj, termination_traj)
+@@ -302,7 +335,10 @@
+ 
+ 
+     def prepare_imagination(self):
+-        imagination_generator = self.system_replay_buffer.mini_batch_generator(self.system_dynamics.history_horizon, 1, self.imagination_storage.num_envs)
++        # [vendor patch:replay-time-order] The imagination history is seeded from real windows only.
++        imagination_generator = self.system_replay_buffer.mini_batch_generator(
++            self.system_dynamics.history_horizon, 1, self.imagination_storage.num_envs, strict=True
++        )
+         imagination_state_history, imagination_action_history = next(imagination_generator)[:2]
+         return imagination_state_history, imagination_action_history
+ 

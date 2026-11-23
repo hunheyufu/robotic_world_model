@@ -3,26 +3,38 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to play a checkpoint if an RL agent from RSL-RL."""
+"""Script to visualize real and imagined rollouts of an RSL-RL agent."""
 
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
 import sys
 
-from isaaclab.app import AppLauncher
+# Run from a checkout without installing the extension into the host environment: the source tree
+# is put on ``sys.path`` before the first ``mbrl`` import. The host venv is never modified.
+_REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "source", "mbrl"))
+if os.path.isdir(_REPO_SRC) and _REPO_SRC not in sys.path:
+    sys.path.insert(0, _REPO_SRC)
+
+from isaaclab.app import add_launcher_args
 
 # local imports
 import cli_args  # isort: skip
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
-parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
+parser = argparse.ArgumentParser(description="Visualize real and imagined ANYmal-D instances side by side.")
+parser.add_argument("--video", action="store_true", default=False, help="Record videos during play.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument(
+    "--num_envs",
+    type=int,
+    default=None,
+    help="Total number of instances (real + imagined). Must be even; the 3.x runtime rejects odd values.",
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
@@ -31,156 +43,98 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
-parser.add_argument("--system_dynamics_load_path", type=str, default=None, help="Dynamics model load path.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
-# append AppLauncher cli args
-AppLauncher.add_app_launcher_args(parser)
+cli_args.add_mbrl_args(parser)
+add_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
-# always enable cameras to record video
+# always enable cameras to record video; recordings come from the Kit viewport
 if args_cli.video:
     args_cli.enable_cameras = True
+    args_cli.visualizer = "kit"
 
-# clear out sys.argv for Hydra
+# clear out sys.argv for the config resolver
 sys.argv = [sys.argv[0]] + hydra_args
-
-# launch omniverse app
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
-import gymnasium as gym
-import os
-import time
-import torch
-
-from rsl_rl.runners import OnPolicyRunner, MBPOOnPolicyRunner
-
-from isaaclab.envs import (
-    DirectMARLEnv,
-    DirectMARLEnvCfg,
-    DirectRLEnvCfg,
-    ManagerBasedRLEnvCfg,
-    multi_agent_to_single_agent,
-)
-from isaaclab.utils.assets import retrieve_file_path
-from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
-
-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
-
-import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.utils import get_checkpoint_path
-from isaaclab_tasks.utils.hydra import hydra_task_config
-
-from omni.kit.viewport.menubar.lighting.actions import _set_lighting_mode
-_set_lighting_mode("Grey Studio") # Colored Lights
+import isaaclab_tasks  # noqa: F401  (registers the host tasks)
 
 # PLACEHOLDER: Extension template (do not remove this comment)
-import mbrl.tasks  # noqa: F401
+import mbrl.tasks  # noqa: F401  (registers the RWM tasks)
+from mbrl.rl.rsl_rl import create_runner, load_checkpoint
+
+import lab3_runtime as runtime
 
 
-@hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
-def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
-    """Play with RSL-RL agent."""
-    task_name = args_cli.task.split(":")[-1]
-    # override configurations with non-hydra CLI arguments
+DEFAULT_TASK = "Template-Isaac-Velocity-Flat-Anymal-D-Visualize-v0"
+
+
+def _run() -> int:
+    """Visualize paired real/imagined instances on Isaac Lab 3.x / Isaac Sim 6.2."""
+    from mbrl import compat
+
+    runtime.report_runtime()
+    task = args_cli.task or DEFAULT_TASK
+    args_cli.task = task
+    if args_cli.num_envs is not None and args_cli.num_envs % 2 != 0:
+        raise ValueError(
+            f"--num_envs is the *total* number of instances and must be even (got {args_cli.num_envs}): "
+            "even indices are real instances, odd indices are their imagination partners."
+        )
+
+    env_cfg, agent_cfg = compat.resolve_task_config(
+        task, "rsl_rl_cfg_entry_point", overrides=hydra_args
+    )
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
-    env_cfg.scene.num_envs *= 2
-
-    # set the environment seed
-    # note: certain randomizations occur in the environment initialization so we set the seed here
+    runtime.apply_env_overrides(args_cli, env_cfg)
+    if env_cfg.scene.num_envs % 2 != 0:
+        raise ValueError(f"The visualize scene needs an even instance count, got {env_cfg.scene.num_envs}.")
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
-    print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("rsl_rl", task_name)
-        if not resume_path:
-            print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
-            return
-    elif args_cli.checkpoint:
-        resume_path = retrieve_file_path(args_cli.checkpoint)
-    else:
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-
+    runtime.apply_smoke_overrides(agent_cfg, args_cli.smoke, kind="visualize")
+    # validate both artifacts before the simulator starts
+    runtime.resolve_dynamics_path(args_cli, agent_cfg)
+    log_root = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
+    resume_path = runtime.resolve_checkpoint(args_cli, agent_cfg, log_root, required=True)
     log_dir = os.path.dirname(resume_path)
-
-    # create isaac environment
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-
-    # convert to single-agent instance if required by the RL algorithm
-    if isinstance(env.unwrapped, DirectMARLEnv):
-        env = multi_agent_to_single_agent(env)
-
-    # wrap for video recording
     if args_cli.video:
-        video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "play"),
-            "step_trigger": lambda step: step == 0,
-            "video_length": args_cli.video_length,
-            "disable_logger": True,
-        }
-        print("[INFO] Recording videos during training.")
-        print_dict(video_kwargs, nesting=4)
-        env = gym.wrappers.RecordVideo(env, **video_kwargs)
+        runtime.attach_video_recorder(env_cfg, os.path.join(log_dir, "videos", "visualize"), args_cli.video_length)
 
-    # wrap around environment for rsl-rl
-    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    steps = 0
+    with runtime.launched_runtime(env_cfg, args_cli):
+        env = runtime.make_env(task, env_cfg)
+        try:
+            vec_env = runtime.wrap_env(env, agent_cfg)
+            runner = create_runner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+            load_checkpoint(
+                runner,
+                resume_path,
+                load_policy=True,
+                load_system_dynamics=True,
+                map_location=agent_cfg.device,
+                allow_partial=args_cli.allow_partial_checkpoint,
+            )
+            policy = runner.get_inference_policy(device=vec_env.device)
+            vec_env.unwrapped.init_imagination_history(agent_cfg.system_dynamics.history_horizon)
+            steps = runtime.bounded_loop(
+                vec_env,
+                policy,
+                args_cli,
+                video_length=args_cli.video_length if args_cli.video else None,
+            )
+        finally:
+            env.close()
+    print(f"[INFO] Visualize finished after {steps} environment steps.")
+    return 0
 
-    print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    # load previously trained model
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "MBPOOnPolicyRunner":
-        agent_cfg.system_dynamics_load_path = args_cli.system_dynamics_load_path if args_cli.system_dynamics_load_path is not None else agent_cfg.system_dynamics_load_path
-        runner = MBPOOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.load(resume_path, load_optimizer=False)
 
-    # obtain the trained policy for inference
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
-
-    dt = env.unwrapped.step_dt
-
-    # reset environment
-    obs = env.get_observations()
-    timestep = 0
-    env.unwrapped.init_imagination_history(agent_cfg.system_dynamics.history_horizon)
-    # simulate environment
-    while simulation_app.is_running():
-        start_time = time.time()
-        # run everything in inference mode
-        with torch.inference_mode():
-            # agent stepping
-            actions = policy(obs)
-            # env stepping
-            obs, _, _, _ = env.step(actions)
-        if args_cli.video:
-            timestep += 1
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
-                break
-
-        # time delay for real-time evaluation
-        sleep_time = dt - (time.time() - start_time)
-        if args_cli.real_time and sleep_time > 0:
-            time.sleep(sleep_time)
-
-    # close the simulator
-    env.close()
+def main() -> int:
+    """Visualize on Isaac Lab 3.x."""
+    return _run()
 
 
 if __name__ == "__main__":
-    # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
+    raise SystemExit(main())

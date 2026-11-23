@@ -11,6 +11,7 @@ import torch
 from mbrl.mbrl.envs import ManagerBasedVisualizeEnv
 from .anymal_d_manager_based_mbrl_env import ANYmalDManagerBasedMBRLEnv
 from mbrl.mbrl.envs.mdp.events import reset_joints_to_specified, reset_root_velocity_to_specified
+from mbrl.compat import to_tensor
 from isaaclab.utils.math import quat_apply
 
 
@@ -25,7 +26,7 @@ class ANYmalDManagerBasedVisualizeEnv(ManagerBasedVisualizeEnv, ANYmalDManagerBa
         joint_vel = parsed_imagination_states["joint_vel"]
         joint_vel += self.default_joint_vel
         
-        root_quat_w = self.scene["robot"].data.root_quat_w[self.env_ids_imagination]
+        root_quat_w = to_tensor(self.scene["robot"].data.root_quat_w)[self.env_ids_imagination]
         
         base_lin_vel_w = quat_apply(root_quat_w, base_lin_vel)
         base_ang_vel_w = quat_apply(root_quat_w, base_ang_vel)

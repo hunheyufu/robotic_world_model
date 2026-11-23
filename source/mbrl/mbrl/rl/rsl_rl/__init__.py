@@ -3,16 +3,18 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Wrappers and utilities to configure an environment for RSL-RL library.
+"""Runner configuration, environment adapter and checkpoint handling for the RWM ``rsl_rl`` fork.
 
-The following example shows how to wrap an environment for RSL-RL:
+The following example shows how to wrap an Isaac Lab 3.x environment for the fork:
 
 .. code-block:: python
 
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+    from mbrl.rl.rsl_rl import MbrlVecEnvWrapper
 
-    env = RslRlVecEnvWrapper(env)
+    env = MbrlVecEnvWrapper(env)
 
 """
 
 from .rl_cfg import *
+from .vecenv_wrapper import MbrlVecEnvWrapper
+from .runner import create_runner, load_checkpoint, describe_checkpoint

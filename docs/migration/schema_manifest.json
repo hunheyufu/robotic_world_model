@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "generated_by": "scripts/reinforcement_learning/rsl_rl/lab3_runtime.py + configs (values observed in the Lab 3.0.0 / Sim 6.2.0-rc.14 probe run; single supported runtime, Python >= 3.12)",
+  "policy_observation": {
+    "group": "policy",
+    "dim": 48,
+    "slices": [
+      {"name": "base_lin_vel", "index": 0, "size": 3, "note": "root linear velocity in the body frame"},
+      {"name": "base_ang_vel", "index": 3, "size": 3, "note": "root angular velocity in the body frame"},
+      {"name": "projected_gravity", "index": 6, "size": 3, "note": "gravity direction in the body frame"},
+      {"name": "velocity_commands", "index": 9, "size": 3, "note": "command [vx, vy, wz]"},
+      {"name": "joint_pos", "index": 12, "size": 12, "note": "relative to the default joint position"},
+      {"name": "joint_vel", "index": 24, "size": 12, "note": "relative to the default joint velocity"},
+      {"name": "last_action", "index": 36, "size": 12, "note": "previous action"}
+    ],
+    "action_dim": 12,
+    "action_scale": 0.5,
+    "action_use_default_offset": true
+  },
+  "system_observation": {
+    "state_dim": 45,
+    "state_slices": {
+      "base_lin_vel": [0, 3],
+      "base_ang_vel": [3, 6],
+      "projected_gravity": [6, 9],
+      "joint_pos": [9, 21],
+      "joint_vel": [21, 33],
+      "applied_torque": [33, 45]
+    },
+    "action_dim": 12,
+    "contact_dim": 8,
+    "contact_order": ["thigh:*", "foot:*"],
+    "termination_dim": 1,
+    "termination_semantics": "base body contact (not a time-out)",
+    "extension_dim": 0,
+    "observation_noise": false,
+    "concatenate_terms": true
+  },
+  "world_model": {
+    "architecture": "rnn/gru (2 layers, hidden 256)",
+    "history_horizon": 32,
+    "forecast_horizon": 8,
+    "online_ensemble_size": 1,
+    "offline_ensemble_size": 5,
+    "contact_threshold_newton": 1.0,
+    "contact_force_semantics": "normal",
+    "contact_force_note": "In Isaac Sim 6.2 the total force moved to net_forces_w_history, so net_normal_forces_w_history is selected explicitly; the label columns are unchanged from the pre-migration checkpoints",
+    "replay_buffer_rows_per_env": 1000,
+    "state_normalizer": "mean/std from the runner config (45 values), empirically fixed",
+    "action_normalizer": "identity (mean 0, std 1)"
+  },
+  "timing": {
+    "sim_dt": 0.005,
+    "decimation": 4,
+    "step_dt": 0.02,
+    "episode_length_s": 20.0,
+    "num_steps_per_env": 24,
+    "init_max_iterations": 1,
+    "init_seed": 42,
+    "init_num_envs": 4
+  },
+  "ordering": {
+    "joint_names": [
+      "LF_HAA", "LH_HAA", "RF_HAA", "RH_HAA",
+      "LF_HFE", "LH_HFE", "RF_HFE", "RH_HFE",
+      "LF_KFE", "LH_KFE", "RF_KFE", "RH_KFE"
+    ],
+    "action_order": "same as joint_names",
+    "body_names": [
+      "base",
+      "LF_HIP", "LH_HIP", "RF_HIP", "RH_HIP",
+      "LF_THIGH", "LH_THIGH", "RF_THIGH", "RH_THIGH",
+      "LF_SHANK", "LH_SHANK", "RF_SHANK", "RH_SHANK",
+      "LF_FOOT", "LH_FOOT", "RF_FOOT", "RH_FOOT"
+    ],
+    "thigh_bodies": ["LF_THIGH", "LH_THIGH", "RF_THIGH", "RH_THIGH"],
+    "foot_bodies": ["LF_FOOT", "LH_FOOT", "RF_FOOT", "RH_FOOT"],
+    "default_joint_pos": [
+      0.0, 0.0, 0.0, 0.0,
+      0.4, -0.4, 0.4, -0.4,
+      -0.8, 0.8, -0.8, 0.8
+    ]
+  },
+  "offline_csv": {
+    "path": "assets/data/state_action_data_0.csv",
+    "columns": 66,
+    "layout": "45 state + 12 action + 0 extension + 8 contact + 1 termination",
+    "rows_shipped": 10000,
+    "termination_semantics": "episode boundary flag (window selection must not cross it)",
+    "window_selection": "select_valid_windows() in scripts/reinforcement_learning/model_based/train.py"
+  },
+  "checkpoint": {
+    "policy_only": ["model_state_dict", "optimizer_state_dict", "iter", "infos"],
+    "policy_and_world_model": [
+      "model_state_dict",
+      "system_dynamics_state_dict",
+      "optimizer_state_dict",
+      "system_dynamics_optimizer_state_dict",
+      "iter",
+      "infos"
+    ],
+    "actor": [48, 128, 128, 128, 12],
+    "critic": [48, 128, 128, 128, 1],
+    "loaded_by": "mbrl.rl.rsl_rl.runner.load_checkpoint (staged, strict by default)"
+  },
+  "runtime": {
+    "isaaclab": "3.0.0 (checkout C:/IsaacLab, version 3.0.0)",
+    "isaacsim": "6.2.0-rc.14+release.52805.02189a84.gl",
+    "python": ">= 3.12 (validated with 3.12.15, C:/IsaacLab/.venv)",
+    "rsl_rl": "vendored fork in source/mbrl/mbrl/rl/rsl_rl_fork (commit 18eebcdd7145284c8d5eed5d8ed1a4b96c649693), host rsl-rl-lib 5.5.1 untouched",
+    "quaternion": "xyzw (never converted; pre-migration checkpoint tensors keep their column meaning)"
+  },
+  "known_defects": [
+    {
+      "id": "imagination-joint-acc",
+      "where": "source/mbrl/mbrl/tasks/manager_based/locomotion/velocity/config/anymal_d/envs/anymal_d_manager_based_mbrl_env.py",
+      "description": "The imagination dof_acc_l2 term uses policy[:, 12:24] (joint positions) as the previous joint velocity; the velocity slice is [24:36]. Kept unchanged to keep the migration comparison clean; fix with its own numerical test."
+    }
+  ]
+}

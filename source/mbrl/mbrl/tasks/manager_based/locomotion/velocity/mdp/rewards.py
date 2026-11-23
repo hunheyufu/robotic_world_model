@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 from isaaclab.managers import SceneEntityCfg
 
+from mbrl.compat import to_tensor
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -17,7 +19,9 @@ def joint_pos_stand_still(
     asset = env.scene[asset_cfg.name]
     # compute out of limits constraints
     command = torch.norm(env.command_manager.get_command(command_name), dim=1)
-    return torch.sum(torch.abs(asset.data.joint_pos - asset.data.default_joint_pos), dim=1) * (command < threshold)
+    joint_pos = to_tensor(asset.data.joint_pos)
+    default_joint_pos = to_tensor(asset.data.default_joint_pos)
+    return torch.sum(torch.abs(joint_pos - default_joint_pos), dim=1) * (command < threshold)
 
 
 def foot_clearance(
@@ -25,6 +29,8 @@ def foot_clearance(
 ) -> torch.Tensor:
     """Reward the swinging feet for clearing a specified height off the ground"""
     asset = env.scene[asset_cfg.name]
-    foot_z_target_error = torch.square(asset.data.body_pos_w[:, asset_cfg.body_ids, 2] - target_height)
-    foot_velocity_tanh = torch.tanh(tanh_mult * torch.norm(asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=2))
+    body_pos_w = to_tensor(asset.data.body_pos_w)
+    body_lin_vel_w = to_tensor(asset.data.body_lin_vel_w)
+    foot_z_target_error = torch.square(body_pos_w[:, asset_cfg.body_ids, 2] - target_height)
+    foot_velocity_tanh = torch.tanh(tanh_mult * torch.norm(body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=2))
     return torch.exp(-torch.sum(foot_z_target_error * foot_velocity_tanh, dim=1) / std)

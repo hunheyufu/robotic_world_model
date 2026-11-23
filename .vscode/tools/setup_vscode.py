@@ -149,17 +149,24 @@ def overwrite_default_python_interpreter(isaaclab_settings: str) -> str:
     # replace with Isaac Sim's python.sh or python.bat scripts to make sure python with correct
     # source paths is set as default
     if f"kit{os.sep}python{os.sep}bin{os.sep}python" in python_exe:
-        # Check if the OS is Windows or Linux to use appropriate shell file
-        if platform.system() == "Windows":
-            python_exe = python_exe.replace(f"kit{os.sep}python{os.sep}bin{os.sep}python3", "python.bat")
-        else:
-            python_exe = python_exe.replace(f"kit{os.sep}python{os.sep}bin{os.sep}python3", "python.sh")
+        # legacy Sim layout "<isaac_sim>/kit/python/bin/python3.exe": point at the wrapper that is
+        # installed next to the Kit directory, "<isaac_sim>/python.bat" (Windows) or "python.sh"
+        isaacsim_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(python_exe))))
+        wrapper = os.path.join(isaacsim_dir, "python.bat" if platform.system() == "Windows" else "python.sh")
+        # keep the interpreter that actually runs this script if no wrapper is installed
+        if os.path.exists(wrapper):
+            python_exe = wrapper
+
+    # the interpreter is written into a JSON(C) settings file: keep forward slashes so that the path is
+    # a valid JSON string on Windows, and replace via a callable so that backslashes are not parsed as
+    # regular expression escapes (e.g. "C:\IsaacLab\..." used to raise "bad escape \I")
+    python_exe = python_exe.replace("\\", "/")
 
     # replace the default python interpreter in the Isaac Lab settings file with the path to the
     # python interpreter in the Isaac Lab directory
     isaaclab_settings = re.sub(
         r"\"python.defaultInterpreterPath\": \".*?\"",
-        f'"python.defaultInterpreterPath": "{python_exe}"',
+        lambda _match: f'"python.defaultInterpreterPath": "{python_exe}"',
         isaaclab_settings,
         flags=re.DOTALL,
     )

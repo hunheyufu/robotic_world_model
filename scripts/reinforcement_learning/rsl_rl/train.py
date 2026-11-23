@@ -8,9 +8,16 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
 import sys
 
-from isaaclab.app import AppLauncher
+# Run from a checkout without installing the extension into the host environment: the source tree
+# is put on ``sys.path`` before the first ``mbrl`` import. The host venv is never modified.
+_REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "source", "mbrl"))
+if os.path.isdir(_REPO_SRC) and _REPO_SRC not in sys.path:
+    sys.path.insert(0, _REPO_SRC)
+
+from isaaclab.app import add_launcher_args
 
 # local imports
 import cli_args  # isort: skip
@@ -24,76 +31,29 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-parser.add_argument(
-    "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
-)
-parser.add_argument("--system_dynamics_load_path", type=str, default=None, help="Dynamics model load path.")
-# append RSL-RL cli arguments
+# append RSL-RL and project cli arguments
 cli_args.add_rsl_rl_args(parser)
-# append AppLauncher cli args
-AppLauncher.add_app_launcher_args(parser)
+cli_args.add_mbrl_args(parser)
+add_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-# always enable cameras to record video
+# always enable cameras to record video; recordings come from the Kit viewport
 if args_cli.video:
     args_cli.enable_cameras = True
+    args_cli.visualizer = "kit"
 
-# clear out sys.argv for Hydra
+# clear out sys.argv for the config resolver
 sys.argv = [sys.argv[0]] + hydra_args
-
-# launch omniverse app
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
-
-"""Check for minimum supported RSL-RL version."""
-
-import importlib.metadata as metadata
-import platform
-
-from packaging import version
-
-# for distributed training, check minimum supported rsl-rl version
-RSL_RL_VERSION = "2.3.1"
-installed_version = metadata.version("rsl-rl-lib")
-if args_cli.distributed and version.parse(installed_version) < version.parse(RSL_RL_VERSION):
-    if platform.system() == "Windows":
-        cmd = [r".\isaaclab.bat", "-p", "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
-    else:
-        cmd = ["./isaaclab.sh", "-p", "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
-    print(
-        f"Please install the correct version of RSL-RL.\nExisting version is: '{installed_version}'"
-        f" and required version is: '{RSL_RL_VERSION}'.\nTo install the correct version, run:"
-        f"\n\n\t{' '.join(cmd)}\n"
-    )
-    exit(1)
 
 """Rest everything follows."""
 
-import gymnasium as gym
-import os
 import torch
-from datetime import datetime
 
-from rsl_rl.runners import OnPolicyRunner, MBPOOnPolicyRunner
+import lab3_runtime as runtime
 
-from isaaclab.envs import (
-    DirectMARLEnv,
-    DirectMARLEnvCfg,
-    DirectRLEnvCfg,
-    ManagerBasedRLEnvCfg,
-    multi_agent_to_single_agent,
-)
-from isaaclab.utils.dict import print_dict
-from isaaclab.utils.io import dump_yaml
-
-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
-
-import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.utils import get_checkpoint_path
-from isaaclab_tasks.utils.hydra import hydra_task_config
-
+import isaaclab_tasks  # noqa: F401  (registers the host tasks)
 # PLACEHOLDER: Extension template (do not remove this comment)
-import mbrl.tasks  # noqa: F401
+import mbrl.tasks  # noqa: F401  (registers the RWM tasks)
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -101,100 +61,62 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
-@hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
-def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
-    """Train with RSL-RL agent."""
-    # override configurations with non-hydra CLI arguments
-    agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
-    env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
-    agent_cfg.max_iterations = (
-        args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
-    )
+def _run() -> int:
+    """Train with the RWM fork on Isaac Lab 3.x / Isaac Sim 6.2."""
+    from mbrl import compat
 
-    # set the environment seed
-    # note: certain randomizations occur in the environment initialization so we set the seed here
+    runtime.report_runtime()
+    env_cfg, agent_cfg = compat.resolve_task_config(
+        args_cli.task, "rsl_rl_cfg_entry_point", overrides=hydra_args
+    )
+    agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    runtime.apply_env_overrides(args_cli, env_cfg)
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    # multi-gpu training configuration
-    if args_cli.distributed:
-        env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
-        agent_cfg.device = f"cuda:{app_launcher.local_rank}"
-
-        # set seed to have diversity in different threads
-        seed = agent_cfg.seed + app_launcher.local_rank
-        env_cfg.seed = seed
-        agent_cfg.seed = seed
-
-    # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
-    print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs: {time-stamp}_{run_name}
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    # The Ray Tune workflow extracts experiment name using the logging line below, hence, do not change it (see PR #2346, comment-2819298849)
-    print(f"Exact experiment name requested from command line: {log_dir}")
-    if agent_cfg.run_name:
-        log_dir += f"_{agent_cfg.run_name}"
-    log_dir = os.path.join(log_root_path, log_dir)
-
-    # create isaac environment
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-
-    # convert to single-agent instance if required by the RL algorithm
-    if isinstance(env.unwrapped, DirectMARLEnv):
-        env = multi_agent_to_single_agent(env)
-
-    # save resume path before creating a new log_dir
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-
-    # wrap for video recording
-    if args_cli.video:
-        video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "train"),
-            "step_trigger": lambda step: step % args_cli.video_interval == 0,
-            "video_length": args_cli.video_length,
-            "disable_logger": True,
-        }
-        print("[INFO] Recording videos during training.")
-        print_dict(video_kwargs, nesting=4)
-        env = gym.wrappers.RecordVideo(env, **video_kwargs)
-
-    # wrap around environment for rsl-rl
-    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-
-    # create runner from rsl-rl
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "MBPOOnPolicyRunner":
-        agent_cfg.system_dynamics_load_path = args_cli.system_dynamics_load_path if args_cli.system_dynamics_load_path is not None else agent_cfg.system_dynamics_load_path
-        runner = MBPOOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    task_name = args_cli.task.split(":")[-1]
+    if "Pretrain" in task_name:
+        smoke_kind = "pretrain"
+    elif "Finetune" in task_name:
+        smoke_kind = "finetune"
     else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    # write git state to logs
-    runner.add_git_repo_to_log(__file__)
-    # load the checkpoint
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-        # load previously trained model
-        runner.load(resume_path, load_optimizer=False)
+        smoke_kind = "init"
+    runtime.apply_smoke_overrides(agent_cfg, args_cli.smoke, kind=smoke_kind)
+    if args_cli.max_iterations is not None:
+        agent_cfg.max_iterations = args_cli.max_iterations
+    # validate the dynamics artifact before the simulator starts
+    runtime.resolve_dynamics_path(args_cli, agent_cfg)
 
-    # dump the configuration into log-directory
-    dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
-    dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    log_dir = runtime.make_log_dir(agent_cfg, args_cli)
+    log_root = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
+    resume = bool(agent_cfg.resume)
+    resume_path = runtime.resolve_checkpoint(args_cli, agent_cfg, log_root, required=resume)
+    if args_cli.video:
+        runtime.attach_video_recorder(env_cfg, os.path.join(log_dir, "videos", "train"), args_cli.video_length)
 
-    # run training
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    with runtime.launched_runtime(env_cfg, args_cli):
+        env = runtime.make_env(args_cli.task, env_cfg)
+        try:
+            vec_env = runtime.wrap_env(env, agent_cfg)
+            runner = runtime.build_runner(vec_env, agent_cfg, log_dir)
+            runner.add_git_repo_to_log(__file__)
+            runtime.load_training_checkpoint(runner, resume_path, agent_cfg, args_cli, resume=resume)
+            runtime.dump_configs(log_dir, env_cfg, agent_cfg)
+            runner.learn(
+                num_learning_iterations=agent_cfg.max_iterations,
+                init_at_random_ep_len=agent_cfg.init_at_random_ep_len,
+            )
+        finally:
+            env.close()
 
-    # close the simulator
-    env.close()
+    print(f"[INFO] Run directory: {log_dir}")
+    return 0
+
+
+def main() -> int:
+    """Train on Isaac Lab 3.x."""
+    return _run()
 
 
 if __name__ == "__main__":
-    # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
+    raise SystemExit(main())

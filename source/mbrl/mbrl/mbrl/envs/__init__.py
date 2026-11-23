@@ -43,5 +43,24 @@ For more information about the workflow design patterns, see the `Task Design Wo
 """
 
 from . import mdp
-from .manager_based_mbrl_env import ManagerBasedMBRLEnv
-from .manager_based_visualize_env import ManagerBasedVisualizeEnv
+
+# Importing the environment classes pulls in USD/Kit modules (``isaaclab.scene`` ->
+# ``isaaclab.assets.visual_material`` -> ``pxr``).  Isaac Lab 3.x resolves task configs before the
+# simulator starts, so the classes are resolved lazily on first attribute access (PEP 562).
+__all__ = ["ManagerBasedMBRLEnv", "ManagerBasedVisualizeEnv", "mdp"]
+_LAZY_ATTRS = {
+    "ManagerBasedMBRLEnv": ".manager_based_mbrl_env",
+    "ManagerBasedVisualizeEnv": ".manager_based_visualize_env",
+}
+
+
+def __getattr__(name: str):
+    """Resolve the environment classes on first access without importing ``pxr`` eagerly."""
+    if name in _LAZY_ATTRS:
+        import importlib
+
+        module = importlib.import_module(_LAZY_ATTRS[name], __name__)
+        value = getattr(module, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

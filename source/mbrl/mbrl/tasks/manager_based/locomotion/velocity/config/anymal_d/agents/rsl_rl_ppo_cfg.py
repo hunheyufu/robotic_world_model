@@ -4,14 +4,69 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from isaaclab.utils import configclass
+from dataclasses import MISSING
 
-from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_d.agents.rsl_rl_ppo_cfg import AnymalDFlatPPORunnerCfg
 from mbrl.rl.rsl_rl import (
+    RslRlActorCriticCfg,
+    RslRlRwmPpoAlgorithmCfg,
+    RslRlRwmRunnerCfg,
     RslRlSystemDynamicsCfg,
     RslRlNormalizerCfg,
     RslRlMbrlImaginationCfg,
     RslRlMbrlPpoAlgorithmCfg,
 )
+
+
+@configclass
+class AnymalDFlatPPORunnerCfg(RslRlRwmRunnerCfg):
+    """PPO runner configuration for the ANYmal-D flat tasks.
+
+    The policy/algorithm layout is the one stored by the pre-migration checkpoints (single
+    ``policy`` observation set, ``ActorCritic`` with 128x3 hidden layers).  It is defined here
+    explicitly because Isaac Lab 3.x ships a different runner configuration.
+    """
+
+    policy: RslRlActorCriticCfg = RslRlActorCriticCfg(
+        init_noise_std=1.0,
+        noise_std_type="scalar",
+        state_dependent_std=False,
+        actor_hidden_dims=[128, 128, 128],
+        critic_hidden_dims=[128, 128, 128],
+        activation="elu",
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+    )
+    algorithm: RslRlRwmPpoAlgorithmCfg = RslRlRwmPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+    def __post_init__(self):
+        self.max_iterations = 300
+        self.experiment_name = "anymal_d_flat"
+
+
+@configclass
+class AnymalDFlatPPOInitRunnerCfg(AnymalDFlatPPORunnerCfg):
+    """PPO runner configuration for the Init environment.
+
+    The Init task only defines the ``policy`` observation group, so the ``critic``
+    observation set reuses that group. The remaining hyperparameters and the disabled
+    empirical normalization are inherited unchanged from ``AnymalDFlatPPORunnerCfg``.
+    """
+
+    class_name: str = "OnPolicyRunner"
+    obs_groups: dict[str, list[str]] = {"policy": ["policy"], "critic": ["policy"]}
 
 
 @configclass
@@ -109,10 +164,9 @@ class AnymalDFlatPPOPretrainRunnerCfg(AnymalDFlatPPORunnerCfg):
 
 @configclass
 class AnymalDFlatPPOFinetuneRunnerCfg(AnymalDFlatPPOPretrainRunnerCfg):
-    resume = True
-    load_run = "2025-11-04_09-59-00"
+    resume = False
     load_system_dynamics = True
-    system_dynamics_load_path = "logs/rsl_rl/anymal_d_flat/2025-11-04_14-31-20_pretrain_rnn/model_5000.pt"
+    system_dynamics_load_path = None
     system_dynamics_warmup_iterations = 500
     run_name = "finetune"
     def __post_init__(self):
@@ -128,7 +182,7 @@ class AnymalDFlatPPOFinetuneRunnerCfg(AnymalDFlatPPOPretrainRunnerCfg):
 
 @configclass
 class AnymalDFlatPPOVisualizeRunnerCfg(AnymalDFlatPPOPretrainRunnerCfg):
-    resume = True
+    resume = False
     load_system_dynamics = True
-    system_dynamics_load_path = "logs/rsl_rl/anymal_d_flat/2025-11-04_14-31-20_pretrain_rnn/model_5000.pt"
+    system_dynamics_load_path = None
     run_name = "visualize"

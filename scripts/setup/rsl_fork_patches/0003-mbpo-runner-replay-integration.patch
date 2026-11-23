@@ -1,0 +1,53 @@
+Project patch for the vendored RWM rsl_rl fork: runners/mbpo_on_policy_runner.py
+
+Applied by scripts/setup/vendor_rsl_fork.py after the rsl_rl.* -> mbrl.rl.rsl_rl_fork.*
+import rewrite; see the [vendor patch:*] comments in the code. Never edit the vendored tree by hand.
+
+--- a/runners/mbpo_on_policy_runner.py
++++ b/runners/mbpo_on_policy_runner.py
+@@ -25,6 +25,14 @@
+ 
+ class MBPOOnPolicyRunner(OnPolicyRunner):
+     """On-policy runner for training and evaluation of actor-critic methods."""
++
++    def __init__(self, env, train_cfg, log_dir=None, device="cpu"):
++        super().__init__(env, train_cfg, log_dir=log_dir, device=device)
++        # [vendor patch] ``learn`` clears ``imagination_infos`` unconditionally, but the attribute is
++        # only created when the imagination rollout is enabled, which breaks the world-model-only
++        # (pretrain, ``num_envs == 0``) configuration with an AttributeError at the end of the first
++        # iteration. Initialize it here so both configurations run.
++        self.imagination_infos = []
+ 
+     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
+         # initialize writer
+@@ -96,7 +104,7 @@
+                         self.alg.process_env_step(obs, rewards, dones, extras)
+                     # Extract intrinsic rewards (only for logging)
+                     intrinsic_rewards = self.alg.intrinsic_rewards if self.alg.rnd else None
+-                    self.alg.fill_history_buffer(obs)
++                    self.alg.fill_history_buffer(obs, dones)
+                     # book keeping
+                     if self.log_dir is not None:
+                         if "episode" in extras:
+@@ -196,7 +204,7 @@
+                 imagination_obs, imagination_rewards, imagination_dones, imagination_extras, self.state_history, self.action_history, uncertainty = self.env.unwrapped.imagination_step(imagination_actions, self.state_history, self.action_history)
+                 reset_env_ids = imagination_dones.nonzero(as_tuple=False).squeeze(-1)
+                 if len(reset_env_ids) > 0:
+-                    imagination_generator = self.alg.system_replay_buffer.mini_batch_generator(self.alg.system_dynamics.history_horizon, 1, len(reset_env_ids))
++                    imagination_generator = self.alg.system_replay_buffer.mini_batch_generator(                    self.alg.system_dynamics.history_horizon, 1, len(reset_env_ids), strict=True)
+                     imagination_state_history, imagination_action_history = next(imagination_generator)[:2]
+                     self.state_history[reset_env_ids] = imagination_state_history[:, -self.state_history.shape[1]:]
+                     self.action_history[reset_env_ids] = imagination_action_history[:, -self.action_history.shape[1]:]
+@@ -279,7 +287,11 @@
+         self.writer.add_scalar("System Dynamics/learning_rate", self.alg.system_dynamics_learning_rate, locs["it"])
+         
+         if locs["it"] % self.save_interval == 0:
+-            state_traj, action_traj, extension_traj, contact_traj, termination_traj, state_traj_pred, action_traj_pred, extension_traj_pred, contact_traj_pred, termination_traj_pred, traj_autoregressive_error, traj_autoregressive_error_noised_dict = self.alg.evaluate_system_dynamics()
++            evaluation = self.alg.evaluate_system_dynamics()
++            if evaluation is None:
++                # [vendor patch:replay-time-order] no valid (contiguous, reset-free) trajectory yet
++                return
++            state_traj, action_traj, extension_traj, contact_traj, termination_traj, state_traj_pred, action_traj_pred, extension_traj_pred, contact_traj_pred, termination_traj_pred, traj_autoregressive_error, traj_autoregressive_error_noised_dict = evaluation
+             state_traj = self.state_normalizer.inverse(state_traj)
+             action_traj = self.action_normalizer.inverse(action_traj)
+             state_traj_pred = self.state_normalizer.inverse(state_traj_pred)

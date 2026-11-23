@@ -10,14 +10,16 @@ import torch
 from tensordict import TensorDict
 
 from mbrl.mbrl.envs import ManagerBasedMBRLEnv
+from mbrl.compat import to_tensor
 
 
 class ANYmalDManagerBasedMBRLEnv(ManagerBasedMBRLEnv):
 
 
     def _init_additional_attributes(self):
-        self.default_joint_pos = self.scene["robot"].data.default_joint_pos[0]
-        self.default_joint_vel = self.scene["robot"].data.default_joint_vel[0]
+        robot_data = self.scene["robot"].data
+        self.default_joint_pos = to_tensor(robot_data.default_joint_pos)[0]
+        self.default_joint_vel = to_tensor(robot_data.default_joint_vel)[0]
         self.base_velocity = None
 
 

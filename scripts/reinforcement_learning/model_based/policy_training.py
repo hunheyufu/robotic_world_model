@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rsl_rl.algorithms import PPO
+from mbrl.rl.rsl_rl_fork.algorithms import PPO
 from envs.base import BaseEnv
 
 import os
@@ -8,7 +8,64 @@ import statistics
 import time
 import torch
 from collections import deque
-import wandb
+from datetime import datetime
+
+
+class RunLogger:
+    """Minimal logging backend for the offline policy training run.
+
+    Supported backends:
+
+    * ``"tensorboard"``: ``torch.utils.tensorboard.SummaryWriter`` (no network access),
+    * ``"wandb"``: Weights & Biases, only when the package is installed,
+    * ``"none"``: no-op.
+
+    The previous implementation called ``wandb.log`` unconditionally, which made offline training
+    depend on a network service and on an optional package.
+    """
+
+    def __init__(self, backend: str = "tensorboard", log_dir: str | None = None, project: str | None = None, config: dict | None = None):
+        self.backend = backend
+        self._writer = None
+        self._wandb = None
+        self.run_name = None
+        if backend == "tensorboard":
+            from torch.utils.tensorboard import SummaryWriter
+
+            self._writer = SummaryWriter(log_dir=log_dir)
+        elif backend == "wandb":
+            try:
+                import wandb
+            except ImportError as exc:  # pragma: no cover - depends on the install
+                raise RuntimeError(
+                    "--logger wandb requires the 'wandb' package; use --logger tensorboard (or none) offline."
+                ) from exc
+            self._wandb = wandb
+            wandb.init(project=project, dir=log_dir)
+            if config is not None:
+                wandb.config.update(config)
+        elif backend != "none":
+            raise ValueError(f"Unknown logger backend {backend!r}; expected 'tensorboard', 'wandb' or 'none'.")
+
+    def set_run_name(self, run_name: str) -> None:
+        self.run_name = run_name
+        if self._wandb is not None:
+            self._wandb.run.name = run_name
+
+    def log(self, log_dict: dict, step: int | None = None) -> None:
+        if self._writer is not None:
+            for key, value in log_dict.items():
+                scalar = value.item() if isinstance(value, torch.Tensor) else value
+                self._writer.add_scalar(key, scalar, step)
+        elif self._wandb is not None:
+            self._wandb.log(log_dict, step=step)
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.flush()
+            self._writer.close()
+        if self._wandb is not None:
+            self._wandb.finish()
 
 
 class PolicyTraining:
@@ -22,10 +79,12 @@ class PolicyTraining:
         save_interval=200,
         max_iterations=1000,
         export_dir=None,
+        logger: RunLogger | None = None,
         ):
         self.env = env
         self.alg = alg
         self.device = device
+        self.logger = logger if logger is not None else RunLogger("none")
         self.alg.init_storage(
             "rl",
             env.num_envs,
@@ -183,7 +242,7 @@ class PolicyTraining:
                 "Perf/learning_time": locs["learn_time"],
                 })
         
-        wandb.log(self.log_dict)
+        self.logger.log(self.log_dict, step=self.current_learning_iteration)
 
         str = f" \033[1m Learning iteration {locs['it']}/{locs['tot_iter']} \033[0m "
 

@@ -9,10 +9,26 @@ from __future__ import annotations
 import torch
 
 from isaaclab.envs.common import VecEnvStepReturn
+from isaaclab.utils import index_fill_
+
 from .manager_based_mbrl_env import ManagerBasedMBRLEnv, ManagerBasedRLEnvCfg
 
 
 class ManagerBasedVisualizeEnv(ManagerBasedMBRLEnv):
+    """Visualize environment with paired real/imagination instances.
+
+    Even indices are real instances, odd indices are their imagination partners.  The class keeps
+    the shared imagination-history helpers and mirrors the Isaac Lab 3.x ``ManagerBasedRLEnv.step``
+    lifecycle, adding exactly three things:
+
+    * the imagination write is performed before the last physics sub-step,
+    * resets are paired (a real instance and its imagination partner reset together),
+    * the imagination histories are re-synchronised from the real instance after the observation
+      update.
+
+    Everything else (recorder lifecycle, physics-owned decimation, render enabling, UI reset
+    requests) follows the parent class verbatim so the 3.x lifecycle is preserved.
+    """
     
     
     def __init__(self, cfg: ManagerBasedRLEnvCfg, render_mode: str | None = None, **kwargs):
@@ -32,91 +48,6 @@ class ManagerBasedVisualizeEnv(ManagerBasedMBRLEnv):
         self.imagination_state_history[env_ids_real // 2, -1] = self.imagination_state_normalizer(self.observation_manager.compute()["system_state"])[env_ids_real]
 
 
-    def step(self, action: torch.Tensor) -> VecEnvStepReturn:
-        """Execute one time-step of the environment's dynamics and reset terminated environments.
-
-        Unlike the :class:`ManagerBasedEnv.step` class, the function performs the following operations:
-
-        1. Process the actions.
-        2. Perform physics stepping.
-        3. Perform rendering if gui is enabled.
-        4. Update the environment counters and compute the rewards and terminations.
-        5. Reset the environments that terminated.
-        6. Compute the observations.
-        7. Return the observations, rewards, resets and extras.
-
-        Args:
-            action: The actions to apply on the environment. Shape is (num_envs, action_dim).
-
-        Returns:
-            A tuple containing the observations, rewards, resets (terminated and truncated) and extras.
-        """
-        # process actions
-        self.action_manager.process_action(action.to(self.device))
-
-        # check if we need to do rendering within the physics loop
-        # note: checked here once to avoid multiple checks within the loop
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
-
-        # perform physics stepping
-        for i in range(self.cfg.decimation):
-            self._sim_step_counter += 1
-            # set actions into buffers
-            self.action_manager.apply_action()
-            # set actions into simulator
-            self.scene.write_data_to_sim()
-            # write imagination states
-            if i == self.cfg.decimation - 1:
-                self._update_imagination_envs(action)
-            # simulate
-            self.sim.step(render=False)
-            # render between steps only if the GUI or an RTX sensor needs it
-            # note: we assume the render interval to be the shortest accepted rendering interval.
-            #    If a camera needs rendering at a faster frequency, this will lead to unexpected behavior.
-            if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
-                self.sim.render()
-            # update buffers at sim dt
-            self.scene.update(dt=self.physics_dt)
-
-        # post-step:
-        # -- update env counters (used for curriculum generation)
-        self.episode_length_buf += 1  # step in current episode (per env)
-        self.common_step_counter += 1  # total step (common for all envs)
-        # -- check terminations
-        self.reset_buf = self.termination_manager.compute()
-        self.reset_terminated = self.termination_manager.terminated
-        self.reset_time_outs = self.termination_manager.time_outs
-        # -- reward computation
-        self.reward_buf = self.reward_manager.compute(dt=self.step_dt)
-
-        # -- reset envs that terminated/timed-out and log the episode information
-        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
-        if len(reset_env_ids) > 0:
-            uniques, counts = torch.cat([reset_env_ids, self.env_ids_real]).unique(return_counts=True)
-            env_ids_real = uniques[counts > 1]
-            env_ids_imagination = env_ids_real + 1
-            env_ids = torch.vstack([env_ids_real, env_ids_imagination]).T.flatten()
-            if len(env_ids) > 0:
-                self._reset_idx(env_ids)
-            # if sensors are added to the scene, make sure we render to reflect changes in reset
-            if self.sim.has_rtx_sensors() and self.cfg.rerender_on_reset:
-                self.sim.render()
-
-        # -- update command
-        self.command_manager.compute(dt=self.step_dt)
-        # -- step interval events
-        if "interval" in self.event_manager.available_modes:
-            self.event_manager.apply(mode="interval", dt=self.step_dt)
-        # -- compute observations
-        # note: done after reset to get the correct observations for reset envs
-        self.obs_buf = self.observation_manager.compute()
-        if len(reset_env_ids) > 0 and len(env_ids_real) > 0:
-            self._sync_imagination_history(env_ids_real)
-
-        # return observations, rewards, resets and extras
-        return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
-
-
     def _update_imagination_envs(self, action):
         self.num_imagination_envs = len(self.env_ids_imagination)
         rollout_action = action[self.env_ids_imagination]
@@ -133,3 +64,83 @@ class ManagerBasedVisualizeEnv(ManagerBasedMBRLEnv):
 
     def _reset_imagination_sim(self, parsed_imagination_states):
         raise NotImplementedError
+
+
+    def step(self, action: torch.Tensor) -> VecEnvStepReturn:
+        """Step the paired real/imagination environment.
+
+        Mirrors the Isaac Lab 3.x ``ManagerBasedRLEnv.step`` lifecycle and inserts the imagination
+        write before the last physics sub-step, the paired reset and the history synchronisation.
+        """
+        self.action_manager.process_action(action.to(self.device))
+        self.recorder_manager.record_pre_step()
+
+        is_rendering = self.sim.is_rendering
+        steps_per_call = self.cfg.decimation if self._physics_handles_decimation else 1
+        num_calls = self.cfg.decimation // steps_per_call
+        for call_index in range(num_calls):
+            self._sim_step_counter += steps_per_call
+            self.action_manager.apply_action()
+            self.scene.write_data_to_sim()
+            if call_index == num_calls - 1:
+                # write the predicted state of the odd instances before the last physics step
+                self._update_imagination_envs(action)
+            self.sim.step(render=False)
+            self.recorder_manager.record_post_physics_decimation_step()
+            if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
+                self.sim.render(skip_app_pumping=not self.render_enabled)
+            self.scene.update(dt=self.physics_dt * steps_per_call)
+
+        # post-step: counters, terminations, rewards
+        self.episode_length_buf += 1
+        self.common_step_counter += 1
+        self.reset_buf = self.termination_manager.compute()
+        self.reset_terminated = self.termination_manager.terminated
+        self.reset_time_outs = self.termination_manager.time_outs
+        self.reward_buf = self.reward_manager.compute(dt=self.step_dt)
+
+        if len(self.recorder_manager.active_terms) > 0:
+            self.obs_buf = self.observation_manager.compute()
+            self.recorder_manager.record_post_step()
+
+        # paired reset: a real instance resets together with the imagination instance next to it
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1).int()
+        env_ids_real = torch.empty(0, dtype=torch.long, device=self.device)
+        if len(reset_env_ids) > 0:
+            uniques, counts = torch.cat([reset_env_ids, self.env_ids_real]).unique(return_counts=True)
+            env_ids_real = uniques[counts > 1]
+            env_ids = torch.vstack([env_ids_real, env_ids_real + 1]).T.flatten()
+            if len(env_ids) > 0:
+                self.recorder_manager.record_pre_reset(env_ids)
+                self._reset_idx(env_ids)
+                self.recorder_manager.record_post_reset(env_ids)
+            if (
+                self.render_enabled
+                and is_rendering
+                and self.has_rtx_sensors
+                and self.cfg.num_rerenders_on_reset > 0
+            ):
+                for _ in range(self.cfg.num_rerenders_on_reset):
+                    self.sim.render()
+
+        # handle episode reset requested from visualizer UI controls
+        if self.sim.consume_reset_request():
+            not_yet_reset = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+            index_fill_(not_yet_reset, reset_env_ids, False)
+            manual_reset_ids = not_yet_reset.nonzero(as_tuple=False).squeeze(-1).int()
+            if len(manual_reset_ids) > 0:
+                index_fill_(self.reset_terminated, manual_reset_ids, True)
+                self.recorder_manager.record_pre_reset(manual_reset_ids)
+                self._reset_idx(manual_reset_ids)
+                self.recorder_manager.record_post_reset(manual_reset_ids)
+
+        self.command_manager.compute(dt=self.step_dt)
+        if "interval" in self.event_manager.active_terms:
+            self.event_manager.apply(mode="interval", dt=self.step_dt)
+        for recorder in self.video_recorders:
+            recorder.step()
+        self.obs_buf = self.observation_manager.compute(update_history=True)
+        if len(env_ids_real) > 0:
+            self._sync_imagination_history(env_ids_real)
+
+        return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras

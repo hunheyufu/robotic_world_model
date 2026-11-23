@@ -7,6 +7,65 @@ if TYPE_CHECKING:
     from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg
 
 
+def add_mbrl_args(parser: argparse.ArgumentParser):
+    """Add the project arguments shared by the train/play/visualize entry points.
+
+    Args:
+        parser: The parser to add the arguments to.
+    """
+    arg_group = parser.add_argument_group("world_model", description="Arguments for the RWM entries.")
+    arg_group.add_argument(
+        "--system_dynamics_load_path", type=str, default=None, help="Dynamics model load path."
+    )
+    arg_group.add_argument(
+        "--max_steps",
+        type=int,
+        default=None,
+        help="Stop the play/visualize loop after this many environment steps (bounded runs).",
+    )
+    arg_group.add_argument(
+        "--smoke",
+        action="store_true",
+        default=False,
+        help="Small-scale acceptance run: shorter rollouts/imagination and no long warmup.",
+    )
+    arg_group.add_argument(
+        "--log_root",
+        type=str,
+        default=None,
+        help="Root directory for new runs (defaults to logs/rsl_rl/<experiment_name>).",
+    )
+    arg_group.add_argument(
+        "--run_timestamp",
+        type=str,
+        default=None,
+        help="Run directory name (defaults to the current timestamp).",
+    )
+    arg_group.add_argument(
+        "--allow_partial_checkpoint",
+        action="store_true",
+        default=False,
+        help="Load checkpoints with strict=False. Only for artifacts verified by hand.",
+    )
+    arg_group.add_argument(
+        "--resume_optimizer",
+        action="store_true",
+        default=False,
+        help="Restore optimizer state as well. Cross-runtime resume is not guaranteed.",
+    )
+    arg_group.add_argument(
+        "--physics",
+        type=str,
+        default="isaacsim_physx",
+        choices=["physx", "isaacsim_physx", "newton_mjwarp", "newton_vbd", "ovphysx"],
+        help=(
+            "Physics backend for the Isaac Lab 3.x launcher. The default keeps the Isaac Sim "
+            "PhysX + Kit backend."
+        ),
+    )
+    arg_group.add_argument("--headless", action="store_true", default=False, help="Run without a Kit viewport.")
+
+
 def add_rsl_rl_args(parser: argparse.ArgumentParser):
     """Add RSL-RL arguments to the parser.
 

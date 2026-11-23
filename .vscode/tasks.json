@@ -2,22 +2,17 @@
     "version": "2.0.0",
     "tasks": [
         {
+            // Regenerate .vscode/settings.json (python.defaultInterpreterPath and
+            // python.analysis.extraPaths) and, only when it does not exist yet, .vscode/launch.json.
+            // The interpreter is the one VS Code has selected for this workspace, i.e. the Isaac Lab 3.x /
+            // Isaac Sim 6.2 environment (Python >= 3.12). No python.bat/python.sh wrapper is used: Isaac Sim
+            // is a pip package of that environment and the script reads ISAAC_PATH from it. Only when the
+            // interpreter cannot import isaacsim (e.g. a standalone Kit install) pass the directory by hand:
+            //   "<that python>" .vscode/tools/setup_vscode.py --isaac_path <isaac_sim dir>
             "label": "setup_python_env",
             "type": "shell",
-            "linux": {
-                "command": "${input:isaac_path}/python.sh ${workspaceFolder}/.vscode/tools/setup_vscode.py --isaac_path ${input:isaac_path}"
-            },
-            "windows": {
-                "command": "${input:isaac_path}/python.bat ${workspaceFolder}/.vscode/tools/setup_vscode.py --isaac_path ${input:isaac_path}"
-            }
+            "command": "\"${command:python.interpreterPath}\" \"${workspaceFolder}/.vscode/tools/setup_vscode.py\"",
+            "problemMatcher": []
         }
-    ],
-    "inputs": [
-        {
-            "id": "isaac_path",
-            "description": "Absolute path to the current Isaac Sim installation. Can be skipped if Isaac Sim installed from pip.",
-            "default": "${HOME}/.local/share/ov/pkg/isaac_sim-4.2.0",
-            "type": "promptString"
-        },
     ]
 }

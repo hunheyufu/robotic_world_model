@@ -8,10 +8,13 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers.manager_base import ManagerTermBase
 from isaaclab.managers.manager_term_cfg import ObservationTermCfg
-from isaaclab.sensors import Camera, Imu, RayCaster, RayCasterCamera, TiledCamera
 
+# NOTE: sensor classes are only used for type hints. Importing ``isaaclab.sensors.Camera`` eagerly
+# loads ``isaaclab.sensors.camera.camera``, which imports ``pxr`` and prevents Isaac Lab 3.x from
+# starting the simulator after the task config was resolved.
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
+    from isaaclab.sensors import Camera, Imu, RayCaster, RayCasterCamera, TiledCamera
 
 from isaaclab.envs.utils.io_descriptors import (
     generic_io_descriptor,
@@ -22,6 +25,8 @@ from isaaclab.envs.utils.io_descriptors import (
     record_joint_vel_offsets,
     record_shape,
 )
+
+from mbrl.compat import to_tensor
 
 
 @generic_io_descriptor(
@@ -42,7 +47,8 @@ def over_orientation(env: ManagerBasedEnv, limit_angle: float, asset_cfg: SceneE
     """
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
-    return torch.acos(-asset.data.projected_gravity_b[:, 2]).abs().unsqueeze(-1) > limit_angle
+    projected_gravity = to_tensor(asset.data.projected_gravity_b)
+    return torch.acos(-projected_gravity[:, 2]).abs().unsqueeze(-1) > limit_angle
 
 
 @generic_io_descriptor(observation_type="BodyState", on_inspect=[record_shape, record_dtype, record_body_names])
@@ -63,7 +69,7 @@ def body_height_w(
     """
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.body_pos_w[:, asset_cfg.body_ids, 2]
+    return to_tensor(asset.data.body_pos_w)[:, asset_cfg.body_ids, 2]
 
 
 @generic_io_descriptor(observation_type="BodyState", on_inspect=[record_shape, record_dtype, record_body_names])
@@ -84,4 +90,4 @@ def body_lin_vel_w_norm(
     """
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.norm(asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=2)
+    return torch.norm(to_tensor(asset.data.body_lin_vel_w)[:, asset_cfg.body_ids, :2], dim=2)

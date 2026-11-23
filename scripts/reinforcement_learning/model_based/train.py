@@ -1,17 +1,53 @@
+import os
+import sys
+
+# Run from a checkout without installing the extension into the host environment.
+_REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "source", "mbrl"))
+if os.path.isdir(_REPO_SRC) and _REPO_SRC not in sys.path:
+    sys.path.insert(0, _REPO_SRC)
+
 from configs import BaseConfig, AnymalDFlatConfig
 from envs import BaseEnv, AnymalDFlatEnv
-from policy_training import PolicyTraining
-from rsl_rl.modules import ActorCritic, SystemDynamicsEnsemble
-from rsl_rl.algorithms import PPO
-from rsl_rl.utils import resolve_obs_groups
-import os
+from policy_training import PolicyTraining, RunLogger
+
+# The offline path is pure PyTorch: it uses the vendored RWM fork and never imports Isaac Lab/Kit.
+from mbrl.rl.rsl_rl_fork.modules import ActorCritic, SystemDynamicsEnsemble
+from mbrl.rl.rsl_rl_fork.algorithms import PPO
+from mbrl.rl.rsl_rl_fork.utils import resolve_obs_groups
+
 import torch
 from torch.utils.data import Dataset
 import argparse
 from datetime import datetime
 import time
 import pandas as pd
-import wandb
+
+
+def select_valid_windows(num_steps: int, history_horizon: int, forecast_horizon: int, termination_data: torch.Tensor) -> list[int]:
+    """Return the start indices of windows that do not cross an episode boundary.
+
+    A window covers ``history_horizon + forecast_horizon`` steps.  It is rejected when a
+    termination flag falls inside it (excluding the final step, which starts the next episode), so
+    the RNN is never trained across two episodes.
+
+    Args:
+        num_steps: Number of transition steps in the loaded trajectory.
+        history_horizon: Number of past steps in a window.
+        forecast_horizon: Number of predicted steps in a window.
+        termination_data: Termination flags shaped like the loaded state data; every non-zero entry
+            marks an episode boundary.
+
+    Returns:
+        Ascending list of valid window start indices.
+    """
+    window = history_horizon + forecast_horizon
+    reset_indices = termination_data.flatten().nonzero(as_tuple=False).squeeze(-1)
+    valid_indices: list[int] = []
+    for i in range(num_steps - window + 1):
+        inside = reset_indices[(reset_indices >= i) & (reset_indices < i + window - 1)]
+        if len(inside) == 0:
+            valid_indices.append(i)
+    return valid_indices
 
 
 class ModelBasedExperiment:
@@ -38,33 +74,42 @@ class ModelBasedExperiment:
         batch_termination_data = []
         batch_total_num_data = 0
         while True:
-            try:
-                file = f"state_action_data_{self.data_file_idx}.csv"
-                data = pd.read_csv(os.path.join(dataset_root, dataset_folder, file), header=None)
-            except FileNotFoundError:
-                print(f"[Motion Loader] No data found in {os.path.join(dataset_root, dataset_folder, file)}. Waiting for new data.")
-                time.sleep(1)
-                continue
+            file = f"state_action_data_{self.data_file_idx}.csv"
+            path = os.path.join(dataset_root, dataset_folder, file)
+            if not os.path.isfile(path):
+                # The offline path no longer waits for a producer: a missing file is a hard error.
+                raise FileNotFoundError(
+                    f"[Motion Loader] Dataset file not found: {os.path.abspath(path)}. "
+                    "The offline run expects the shipped CSV; pass --dataset_root/--dataset_folder "
+                    "if your data lives elsewhere."
+                )
+            data = pd.read_csv(path, header=None)
+            expected_columns = self.state_dim + self.action_dim + self.extension_dim + self.contact_dim + self.termination_dim
+            if data.shape[1] != expected_columns:
+                raise ValueError(
+                    f"[Motion Loader] {file} has {data.shape[1]} columns, expected {expected_columns} "
+                    f"(state {self.state_dim} + action {self.action_dim} + extension {self.extension_dim} "
+                    f"+ contact {self.contact_dim} + termination {self.termination_dim})."
+                )
             if len(data) < file_data_size:
-                print(f"[Motion Loader] Not enough data in {os.path.join(dataset_root, dataset_folder, file)}. Waiting for new data.")
-                time.sleep(1)
-                continue
-            else:
-                state_data = torch.tensor(data.iloc[:, :self.state_dim].values, dtype=torch.float32, device=self.device).unsqueeze(0)
-                action_data = torch.tensor(data.iloc[:, self.state_dim:self.state_dim + self.action_dim].values, dtype=torch.float32, device=self.device).unsqueeze(0)
-                extension_data = torch.tensor(data.iloc[:, self.state_dim + self.action_dim:self.state_dim + self.action_dim + self.extension_dim].values, dtype=torch.float32, device=self.device).unsqueeze(0)
-                contact_data = torch.tensor(data.iloc[:, self.state_dim + self.action_dim + self.extension_dim:self.state_dim + self.action_dim + self.extension_dim + self.contact_dim].values, dtype=torch.float32, device=self.device).unsqueeze(0)
-                termination_data = torch.tensor(data.iloc[:, self.state_dim + self.action_dim + self.extension_dim + self.contact_dim:].values, dtype=torch.float32, device=self.device).unsqueeze(0)
-                batch_state_data.append(state_data)
-                batch_action_data.append(action_data)
-                batch_extension_data.append(extension_data)
-                batch_contact_data.append(contact_data)
-                batch_termination_data.append(termination_data)
-                batch_total_num_data += len(data)
-                num_trajs, num_steps, state_dim = state_data.shape
-                print(f"[Motion Loader] Loaded {num_trajs} {dataset_folder} trajectories of {num_steps} steps from {file}.")
-                print(f"[Motion Loader] Total number of data: {batch_total_num_data} / {batch_data_size}")
-                self.data_file_idx += 1
+                raise ValueError(
+                    f"[Motion Loader] {file} has {len(data)} rows, fewer than the required {file_data_size}."
+                )
+            state_data = torch.tensor(data.iloc[:, :self.state_dim].values, dtype=torch.float32, device=self.device).unsqueeze(0)
+            action_data = torch.tensor(data.iloc[:, self.state_dim:self.state_dim + self.action_dim].values, dtype=torch.float32, device=self.device).unsqueeze(0)
+            extension_data = torch.tensor(data.iloc[:, self.state_dim + self.action_dim:self.state_dim + self.action_dim + self.extension_dim].values, dtype=torch.float32, device=self.device).unsqueeze(0)
+            contact_data = torch.tensor(data.iloc[:, self.state_dim + self.action_dim + self.extension_dim:self.state_dim + self.action_dim + self.extension_dim + self.contact_dim].values, dtype=torch.float32, device=self.device).unsqueeze(0)
+            termination_data = torch.tensor(data.iloc[:, self.state_dim + self.action_dim + self.extension_dim + self.contact_dim:].values, dtype=torch.float32, device=self.device).unsqueeze(0)
+            batch_state_data.append(state_data)
+            batch_action_data.append(action_data)
+            batch_extension_data.append(extension_data)
+            batch_contact_data.append(contact_data)
+            batch_termination_data.append(termination_data)
+            batch_total_num_data += len(data)
+            num_trajs, num_steps, state_dim = state_data.shape
+            print(f"[Motion Loader] Loaded {num_trajs} {dataset_folder} trajectories of {num_steps} steps from {file}.")
+            print(f"[Motion Loader] Total number of data: {batch_total_num_data} / {batch_data_size}")
+            self.data_file_idx += 1
             if batch_total_num_data >= batch_data_size:
                 break
         batch_state_data = torch.cat(batch_state_data, dim=1)
@@ -131,16 +176,10 @@ class ModelBasedExperiment:
                 state_data, action_data = self.normalize(state_data, action_data)
                 
                 reset_indices = termination_data.flatten().nonzero(as_tuple=False).squeeze(-1)
-                if wandb.run is not None:
-                    wandb.log(
-                        {
-                            "Data/num_terminations": len(reset_indices),
-                            }
-                    )
-                valid_indices = []
-                for i in range(state_data.shape[1] - history_horizon - forecast_horizon + 1):
-                    if not any(reset_indices[(reset_indices >= i) & (reset_indices < i + history_horizon + forecast_horizon - 1)]):
-                        valid_indices.append(i)
+                print(f"[Motion Loader] Termination steps in the loaded data: {len(reset_indices)}")
+                valid_indices = select_valid_windows(
+                    state_data.shape[1], history_horizon, forecast_horizon, termination_data
+                )
                 # (num_groups, history_horizon + forecast_horizon, dim)
                 self.state_data = torch.cat([state_data[:, i:i + history_horizon + forecast_horizon, :] for i in valid_indices], dim=0)
                 self.action_data = torch.cat([action_data[:, i:i + history_horizon + forecast_horizon, :] for i in valid_indices], dim=0)
@@ -260,7 +299,7 @@ class ModelBasedExperiment:
             )
 
     
-    def train_policy(self, log_dir, num_steps_per_env, save_interval, max_iterations, export_dir):
+    def train_policy(self, log_dir, num_steps_per_env, save_interval, max_iterations, export_dir, logger=None):
         print(f"[Train Policy] Training policy for {max_iterations} iterations.")
         policy_training = PolicyTraining(
             log_dir,
@@ -271,16 +310,17 @@ class ModelBasedExperiment:
             save_interval=save_interval,
             max_iterations=max_iterations,
             export_dir=export_dir,
+            logger=logger,
             )
         policy_training.current_learning_iteration = self.policy_learning_iteration
         policy_training.learn()
         self.policy_learning_iteration += policy_training.max_iterations
 
 
-def run_experiment(config: BaseConfig):
+def run_experiment(config: BaseConfig, logger: RunLogger):
     run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{args_cli.run_num}"
-    log_dir = os.path.join('logs', config.experiment_name, args_cli.task, run_name)
-    wandb.run.name = run_name
+    log_dir = os.path.join(args_cli.log_root or "logs", config.experiment_name, args_cli.task, run_name)
+    logger.set_run_name(run_name)
     os.makedirs(log_dir, exist_ok=True)
     model_experiment = ModelBasedExperiment(**config.experiment_config.to_dict())
     model_experiment.prepare_environment(**config.environment_config.to_dict())
@@ -288,14 +328,15 @@ def run_experiment(config: BaseConfig):
     model_experiment.prepare_policy(**config.policy_architecture_config.to_dict())
     model_experiment.prepare_algorithm(**config.policy_algorithm_config.to_dict())
     model_experiment.prepare_data(**config.data_config.to_dict())
-    model_experiment.train_policy(log_dir, **config.policy_training_config.to_dict())
+    model_experiment.train_policy(
+        log_dir, **config.policy_training_config.to_dict(), logger=logger
+    )
     print(f"Training completed. Policy saved to {log_dir}.")
 
 
-def run(config: BaseConfig):
-    wandb.init(project=config.experiment_name)
-    wandb.config.update(config.to_dict())
-    run_experiment(config)
+def run(config: BaseConfig, logger: RunLogger):
+    run_experiment(config, logger)
+
 
 def resolve_task_config(task: str):
     if task == "anymal_d_flat":
@@ -304,10 +345,44 @@ def resolve_task_config(task: str):
     else:
         raise ValueError(f"Unknown task: {task}")
 
+
+def _apply_cli_overrides(config: BaseConfig) -> None:
+    """Apply the run-shape CLI overrides (device, iterations, smoke) to *config*."""
+    config.experiment_config.device = args_cli.device
+    if args_cli.max_iterations is not None:
+        config.policy_training_config.max_iterations = args_cli.max_iterations
+    if args_cli.smoke:
+        config.policy_training_config.max_iterations = 1
+        config.environment_config.num_envs = min(config.environment_config.num_envs, 64)
+        config.environment_config.max_episode_length = min(config.environment_config.max_episode_length, 32)
+        config.data_config.file_data_size = min(config.data_config.file_data_size, 1000)
+        config.data_config.batch_data_size = min(config.data_config.batch_data_size, 1000)
+        config.policy_training_config.num_steps_per_env = min(
+            config.policy_training_config.num_steps_per_env, 8
+        )
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Online learning training.")
+    parser = argparse.ArgumentParser(description="Offline (pure PyTorch) policy training with a pretrained world model.")
     parser.add_argument("--task", type=str, default="anymal_d_flat", help="Task to use for the experiment.")
     parser.add_argument("--run_num", type=int, default=None, help="Run number for the experiment on the cluster.")
+    parser.add_argument("--device", type=str, default="cpu", help="Torch device for the offline run.")
+    parser.add_argument("--max_iterations", type=int, default=None, help="Override the PPO iteration count.")
+    parser.add_argument("--smoke", action="store_true", default=False, help="Small acceptance run (1 iteration).")
+    parser.add_argument(
+        "--logger", type=str, default="tensorboard", choices=["tensorboard", "wandb", "none"], help="Logging backend."
+    )
+    parser.add_argument("--log_root", type=str, default=None, help="Root directory for the run logs.")
     args_cli = parser.parse_args()
     config = resolve_task_config(args_cli.task)
-    run(config)
+    _apply_cli_overrides(config)
+    logger = RunLogger(
+        args_cli.logger,
+        log_dir=os.path.join(args_cli.log_root or "logs", config.experiment_name, args_cli.task),
+        project=config.experiment_name,
+        config=config.to_dict(),
+    )
+    try:
+        run(config, logger)
+    finally:
+        logger.close()
